@@ -1,3 +1,5 @@
+# forked to support a custom CLIPTextEncode for raw prompts
+
 from __future__ import annotations
 import torch
 
@@ -46,25 +48,102 @@ def interrupt_processing(value=True):
 
 MAX_RESOLUTION=16384
 
-class CLIPTextEncode(ComfyNodeABC):
+class CLIPTextEncode:
     @classmethod
-    def INPUT_TYPES(s) -> InputTypeDict:
+    def INPUT_TYPES(s):
         return {
             "required": {
-                "text": (IO.STRING, {"multiline": True, "dynamicPrompts": True, "tooltip": "The text to be encoded."}), 
-                "clip": (IO.CLIP, {"tooltip": "The CLIP model used for encoding the text."})
+                "text": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "The text to be encoded."}),
+                "clip": ("CLIP", {"tooltip": "The CLIP model used for encoding the text."})
+            },
+            "optional": {
+                "power_user_mode": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "When enabled, bypasses template processing and passes text directly to tokenizer"
+                }),
+                "debug_tokens": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Show token IDs, text, and weights in debug output"
+                })
             }
         }
-    RETURN_TYPES = (IO.CONDITIONING,)
-    OUTPUT_TOOLTIPS = ("A conditioning containing the embedded text used to guide the diffusion model.",)
+    RETURN_TYPES = ("CONDITIONING", "STRING")
+    RETURN_NAMES = ("conditioning", "debug_info")
     FUNCTION = "encode"
-
     CATEGORY = "conditioning"
-    DESCRIPTION = "Encodes a text prompt using a CLIP model into an embedding that can be used to guide the diffusion model towards generating specific images."
 
-    def encode(self, clip, text):
+    def encode(self, clip, text, power_user_mode=False, debug_tokens=False):
+        print("DEBUG: Entering CLIPTextEncode.encode") # Added debug print
+        print(f"DEBUG: Type of clip object: {type(clip)}") # Added debug print
+        print(f"DEBUG: Does clip have 'llama' attribute? {hasattr(clip, 'llama')}") # Added debug print
+
         tokens = clip.tokenize(text)
-        return (clip.encode_from_tokens_scheduled(tokens), )
+
+        debug_info = ""
+        if debug_tokens:
+            debug_info = f"Input text ({len(text)} chars):\n{repr(text)}\n\n"
+
+            if hasattr(clip, 'llama'):
+                # Hunyuan Video model
+                debug_info += f"Token format: <class '{type(tokens).__name__}'>\n"
+                debug_info += f"Token keys: {list(tokens.keys())}\n"
+
+                if "llama" in tokens:
+                    llama_tokens_with_weights = tokens["llama"]
+                    if llama_tokens_with_weights:
+                        llama_tokens = llama_tokens_with_weights[0]
+                        debug_info += f"\nLLAMA Tokens ({len(llama_tokens)}):\n"
+                        for tid, weight in llama_tokens:
+                            token_text = f"Token {tid}"
+                            if hasattr(clip.llama, 'tokenizer'):
+                                token_text += f": {repr(clip.llama.tokenizer.decode([tid]))}"
+                            debug_info += f"{token_text} (weight: {weight})\n"
+                    else:
+                        debug_info += "No LLAMA tokens found.\n"
+                else:
+                    debug_info += "LLAMA tokens key not found in output.\n"
+
+                if "l" in tokens:
+                    clip_tokens_with_weights = tokens["l"]
+                    if clip_tokens_with_weights:
+                        clip_tokens = clip_tokens_with_weights[0]
+                        debug_info += f"\nCLIP-L Tokens ({len(clip_tokens)}):\n"
+                        for tid, weight in clip_tokens:
+                            token_text = f"Token {tid}"
+                            if hasattr(clip.clip_l, 'tokenizer'):
+                                token_text += f": {repr(clip.clip_l.tokenizer.decode([tid]))}"
+                            debug_info += f"{token_text} (weight: {weight})\n"
+                    else:
+                        debug_info += "No CLIP-L tokens found.\n"
+                else:
+                    debug_info += "CLIP-L tokens key not found in output.\n"
+
+            else:
+                # Standard CLIP format
+                debug_info += f"Token format: <class '{type(tokens).__name__}'>\n"
+                token_list = []
+                if isinstance(tokens, list):
+                    token_list = tokens
+                elif isinstance(tokens, dict) and 0 in tokens:
+                    token_list = tokens[0]
+                else:
+                    debug_info += f"Unknown standard CLIP token format: <class '{type(tokens).__name__}'>"
+                    token_list = []
+
+                if token_list:
+                    debug_info += f"\nCLIP Tokens ({len(token_list)}):\n"
+                    for token in token_list:
+                        if isinstance(token, tuple):
+                            tid, weight = token
+                        else:
+                            tid, weight = token, 1.0
+                        token_text = f"Token {tid}"
+                        if hasattr(clip, 'tokenizer'):
+                            token_text += f": {repr(clip.tokenizer.decode([tid]))}"
+                        debug_info += f"{token_text} (weight: {weight})\n"
+
+        cond = clip.encode_from_tokens_scheduled(tokens)
+        return (cond, debug_info)
         
 
 class ConditioningCombine:
@@ -898,7 +977,7 @@ class CLIPLoader:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "clip_name": (folder_paths.get_filename_list("text_encoders"), ),
-                              "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart"], ),
+                              "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv"], ),
                              }}
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "load_clip"
@@ -918,8 +997,6 @@ class CLIPLoader:
             clip_type = comfy.sd.CLIPType.MOCHI
         elif type == "ltxv":
             clip_type = comfy.sd.CLIPType.LTXV
-        elif type == "pixart":
-            clip_type = comfy.sd.CLIPType.PIXART
         else:
             clip_type = comfy.sd.CLIPType.STABLE_DIFFUSION
 
@@ -2166,7 +2243,6 @@ def init_builtin_extra_nodes():
         "nodes_stable3d.py",
         "nodes_sdupscale.py",
         "nodes_photomaker.py",
-        "nodes_pixart.py",
         "nodes_cond.py",
         "nodes_morphology.py",
         "nodes_stable_cascade.py",
